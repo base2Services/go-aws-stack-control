@@ -5,7 +5,6 @@ import (
 	"errors"
 	"strconv"
 	"net/http"
-	"log"
 	"encoding/json"
 	aws "github.com/base2Services/go-b2aws"
 )
@@ -22,6 +21,9 @@ type ActionCallBacks interface {
 	Infof(format string, args ...interface{})
 	Warningf(format string, args ...interface{})
 	Errorf(format string, args ...interface{})
+
+	GetAllInstances() []aws.Instance
+
 }
 
 func ExtractTags(instance aws.Instance) (environment, stack, name, startOrder, stopOrder string) {
@@ -41,14 +43,8 @@ func ExtractTags(instance aws.Instance) (environment, stack, name, startOrder, s
 	return
 }
 
-func GetInstanceGroupTeirMap(callback ActionCallBacks, regionMap map[string]string, stack string, environment string, profileName string) (tiered_instances map[string][]aws.Instance, max_order_pos int) {
-	var w interface{
-		Header() http.Header
-		Write(_ []byte) (int, error)
-		WriteHeader(_ int)
-	}
-
-	all_instances := aws.GetAllInstancesFutures(regionMap, regionMap, client, w, c)
+func GetInstanceGroupTeirMap(callback ActionCallBacks, client *http.Client, regionMap map[string]string, stack string, environment string, profileName string) (tiered_instances map[string][]aws.Instance, max_order_pos int) {
+	all_instances := callback.GetAllInstances()
 	tiered_instances = make(map[string][]aws.Instance)
 
 	max_order_pos = 0
