@@ -37,7 +37,7 @@ func ExtractTags(instance aws.Instance) (environment, stack, name, startOrder, s
 	return
 }
 
-func GetInstanceGroupTeirMap(l log.Logger, regionMap map[string]string, regionMap map[string]string, stack string, environment string, profileName string) (tiered_instances map[string][]aws.Instance, max_order_pos int) {
+func GetInstanceGroupTeirMap(l log.Logger, regionMap map[string]string, stack string, environment string, profileName string) (tiered_instances map[string][]aws.Instance, max_order_pos int) {
 	var w interface{
 		Header() http.Header
 		Write(_ []byte) (int, error)
@@ -52,7 +52,7 @@ func GetInstanceGroupTeirMap(l log.Logger, regionMap map[string]string, regionMa
 	for _, instance := range all_instances {
 		instance_environment, instance_stack, _, _, stopOrder := ExtractTags(instance)
 
-		c.Infof("For instance %s, found %s, %s, %s", instance.InstanceId, instance_environment, instance_stack, stopOrder)
+		l.Infof("For instance %s, found %s, %s, %s", instance.InstanceId, instance_environment, instance_stack, stopOrder)
 		if instance.ProfileName == profileName && environment == instance_environment && stack == instance_stack {
 			stopOrderInt, err := strconv.Atoi(stopOrder)
 			if err == nil {
@@ -73,14 +73,14 @@ func GetInstanceGroupTeirMap(l log.Logger, regionMap map[string]string, regionMa
 
 func TeiredInstanceExecute(l log.Logger, regionMap map[string]string, tiered_instances map[string][]aws.Instance, max_order_pos int, lambda func (ids []string, regionUrl string, successChannel chan aws.StartInstance)) {
 	for i := 1; i <= max_order_pos; i++ {
-		c.Infof("Invoking tier: %d", i)
+		l.Infof("Invoking tier: %d", i)
 		successChannel := make (chan aws.StartInstance)
 		if instances, ok := tiered_instances[strconv.Itoa(i)]; ok {
-			c.Infof("Number of instances: %d", len(instances))
+			l.Infof("Number of instances: %d", len(instances))
 			regionIds := make(map[string][]string)
 			regions := []string{}
 			for _, instance := range instances {
-				c.Infof("Invoking instance: %s", instance.InstanceId)
+				l.Infof("Invoking instance: %s", instance.InstanceId)
 
 				regionUrl, _ := regionMap[instance.Region]
 
@@ -96,9 +96,9 @@ func TeiredInstanceExecute(l log.Logger, regionMap map[string]string, tiered_ins
 				go lambda(regionIds[regionUrl], regionUrl, successChannel)
 			}
 			for i, _ := range instances {
-				c.Infof("Got success %d", i)
+				l.Infof("Got success %d", i)
 				result := <- successChannel
-				c.Infof("Got success %s", result)
+				l.Infof("Got success %s", result)
 			}
 		}
 		close(successChannel)
@@ -110,8 +110,8 @@ func ShutdownEnvironment(l log.Logger, client *http.Client, regionMap map[string
 	tiered_instances, max_order_pos := GetInstanceGroupTeirMap(l, client, regionMap, stack, environment, profileName)
 
 	tmp,_ := json.Marshal(tiered_instances)
-	c.Infof("%s", tmp)
-	c.Infof("Max int: %d", max_order_pos)
+	l.Infof("%s", tmp)
+	l.Infof("Max int: %d", max_order_pos)
 
 	// validate we can shut them down
 	if instance_list, ok := tiered_instances[""]; ok && len(instance_list) > 0 {
@@ -145,8 +145,8 @@ func StartupEnvironment(l log.Logger, client *http.Client, regionMap map[string]
 	tiered_instances, max_order_pos := GetInstanceGroupTeirMap(l, client, regionMap, stack, environment, profileName)
 
 	tmp,_ := json.Marshal(tiered_instances)
-	c.Infof("%s", tmp)
-	c.Infof("Max int: %d", max_order_pos)
+	l.Infof("%s", tmp)
+	l.Infof("Max int: %d", max_order_pos)
 
 	// validate we can shut them down
 	if instance_list, ok := tiered_instances[""]; ok && len(instance_list) > 0 {
@@ -162,7 +162,7 @@ func StartupEnvironment(l log.Logger, client *http.Client, regionMap map[string]
 	// Loop through each milestone shutting down instances in parallel
 	TeiredInstanceExecute(l, regionMap, tiered_instances, max_order_pos, func (ids []string, regionUrl string, successChannel chan aws.StartInstance) {
 			instances, _, _ := aws.StartInstances(publicKey, secretKey, regionUrl, client, nil, ids...)
-			err := WaitUntilInstanceStatusIs(l, client, publicKey, secretKey, regionUrl, client, nil, "running", ids...)
+			err := WaitUntilInstanceStatusIs(l, publicKey, secretKey, regionUrl, client, nil, "running", ids...)
 			if err == nil {
 				callback.TierStartedup()
 			} else {
@@ -174,17 +174,17 @@ func StartupEnvironment(l log.Logger, client *http.Client, regionMap map[string]
 	callback.StackStartedup()
 }
 
-func WaitUntilInstanceStatusIs(l log.Logger, client *http.Client, accessKey string, secretKey string, regionEndpoint string, client *http.Client, w http.ResponseWriter, status string, instanceIds ...string) (err error) {
+func WaitUntilInstanceStatusIs(l log.Logger, accessKey string, secretKey string, regionEndpoint string, client *http.Client, w http.ResponseWriter, status string, instanceIds ...string) (err error) {
 	for tries := 0;;tries++ {
 		time.Sleep(time.Second * 30)
 		instantStatuses, err := aws.GetInstancesStatus(accessKey, secretKey, regionEndpoint, client, nil, true, instanceIds...)
 		if err != nil {
-			c.Infof("Lookup error: %s\n", err)
+			l.Infof("Lookup error: %s\n", err)
 			continue;
 		}
 		i := 0
 		for _, instance := range instantStatuses.Instances {
-			c.Infof("%s does %s == %s", instance.InstanceId, status, instance.InstanceState)
+			l.Infof("%s does %s == %s", instance.InstanceId, status, instance.InstanceState)
 			if instance.InstanceState != status {
 				i++;
 			}
