@@ -5,13 +5,20 @@ import (
 	"errors"
 	"strconv"
 	"net/http"
-	"appengine"
+	"log"
 	"encoding/json"
-	"appengine/urlfetch"
-	"appengine/channel"
 	aws "github.com/base2Services/go-b2aws"
 )
 
+type ActionCallBacks interface {
+	NoSuchEnvironment()
+	MisingOrderTags()
+	TierShutdown()
+	StackShutdown()
+	TierStartedup()
+	StackStartedup()
+	TierTakingTooLong()
+}
 
 func ExtractTags(instance aws.Instance) (environment, stack, name, startOrder, stopOrder string) {
 	for _, tag := range instance.Tags {
@@ -30,15 +37,14 @@ func ExtractTags(instance aws.Instance) (environment, stack, name, startOrder, s
 	return
 }
 
-func GetInstanceGroupTeirMap(c appengine.Context, client *http.Client, session *Session, stack string, environment string, profile Creds) (tiered_instances map[string][]aws.Instance, max_order_pos int) {
-	regionMap := session.RegionMap
+func GetInstanceGroupTeirMap(l log.Logger, regionMap map[string]string, regionMap map[string]string, stack string, environment string, profileName string) (tiered_instances map[string][]aws.Instance, max_order_pos int) {
 	var w interface{
 		Header() http.Header
 		Write(_ []byte) (int, error)
 		WriteHeader(_ int)
 	}
 
-	all_instances := getAllInstancesFutures(regionMap, session, client, w, c)
+	all_instances := aws.GetAllInstancesFutures(regionMap, regionMap, client, w, c)
 	tiered_instances = make(map[string][]aws.Instance)
 
 	max_order_pos = 0
@@ -47,7 +53,7 @@ func GetInstanceGroupTeirMap(c appengine.Context, client *http.Client, session *
 		instance_environment, instance_stack, _, _, stopOrder := ExtractTags(instance)
 
 		c.Infof("For instance %s, found %s, %s, %s", instance.InstanceId, instance_environment, instance_stack, stopOrder)
-		if instance.ProfileName == profile.Name && environment == instance_environment && stack == instance_stack {
+		if instance.ProfileName == profileName && environment == instance_environment && stack == instance_stack {
 			stopOrderInt, err := strconv.Atoi(stopOrder)
 			if err == nil {
 				if stopOrderInt > max_order_pos {
@@ -65,7 +71,7 @@ func GetInstanceGroupTeirMap(c appengine.Context, client *http.Client, session *
 	return
 }
 
-func TeiredInstanceExecute(c appengine.Context, session *Session, tiered_instances map[string][]aws.Instance, max_order_pos int, lambda func (ids []string, regionUrl string, successChannel chan aws.StartInstance)) {
+func TeiredInstanceExecute(l log.Logger, regionMap map[string]string, tiered_instances map[string][]aws.Instance, max_order_pos int, lambda func (ids []string, regionUrl string, successChannel chan aws.StartInstance)) {
 	for i := 1; i <= max_order_pos; i++ {
 		c.Infof("Invoking tier: %d", i)
 		successChannel := make (chan aws.StartInstance)
@@ -76,7 +82,7 @@ func TeiredInstanceExecute(c appengine.Context, session *Session, tiered_instanc
 			for _, instance := range instances {
 				c.Infof("Invoking instance: %s", instance.InstanceId)
 
-				regionUrl, _ := session.RegionMap[instance.Region]
+				regionUrl, _ := regionMap[instance.Region]
 
 				instance_list, ok := regionIds[regionUrl]
 				if !ok {
@@ -99,11 +105,9 @@ func TeiredInstanceExecute(c appengine.Context, session *Session, tiered_instanc
 	}
 }
 
-func ShutdownEnvironment(c appengine.Context, session *Session, stack string, environment string, profile Creds) {
+func ShutdownEnvironment(l log.Logger, client *http.Client, regionMap map[string]string, stack string, environment string, profileName string, publicKey string, secretKey string, callback ActionCallBacks) {
 	// Get instances and filter for the environments
-	client := urlfetch.Client(c)
-
-	tiered_instances, max_order_pos := GetInstanceGroupTeirMap(c, client, session, stack, environment, profile)
+	tiered_instances, max_order_pos := GetInstanceGroupTeirMap(l, client, regionMap, stack, environment, profileName)
 
 	tmp,_ := json.Marshal(tiered_instances)
 	c.Infof("%s", tmp)
@@ -111,47 +115,34 @@ func ShutdownEnvironment(c appengine.Context, session *Session, stack string, en
 
 	// validate we can shut them down
 	if instance_list, ok := tiered_instances[""]; ok && len(instance_list) > 0 {
-		channel.SendJSON(c, session.Token, map[string]string {
-			"Error": "Can not startup or shutdown environment.\nEnsure all tags are in use.",
-		})
+		callback.NoSuchEnvironment()
 		return
 	}
 	if max_order_pos < 1 {
 		// Nothing to do, no shutdown order
-		channel.SendJSON(c, session.Token, map[string]string {
-			"Error": "No startup or shutdown tags filled, or all are below 1.",
-		})
+		callback.MisingOrderTags()
 		return
 	}
 
 	// Loop through each milestone shutting down instances in parallel
-	TeiredInstanceExecute(c, session, tiered_instances, max_order_pos, func (ids []string, regionUrl string, successChannel chan aws.StartInstance) {
-			instances, _, _ := aws.StopInstances(profile.Pkey, profile.Skey, regionUrl, client, nil, ids...)
-			err := WaitUntilInstanceStatusIs(c, profile.Pkey, profile.Skey, regionUrl, client, nil, "stopped", ids...)
+	TeiredInstanceExecute(l, regionMap, tiered_instances, max_order_pos, func (ids []string, regionUrl string, successChannel chan aws.StartInstance) {
+			instances, _, _ := aws.StopInstances(publicKey, secretKey, regionUrl, client, nil, ids...)
+			err := WaitUntilInstanceStatusIs(l, publicKey, secretKey, regionUrl, client, nil, "stopped", ids...)
 			if err == nil {
-				channel.SendJSON(c, session.Token, map[string]string {
-					"Action": "Refresh",
-					"Message": "Teir Shutdown",
-				})
+				callback.TierShutdown()
 			} else {
-				channel.SendJSON(c, session.Token, map[string]string {
-					"Error": "Teir taking to long skipping to next",
-				})
+				callback.TierTakingTooLong()
 			}
 			successChannel <- instances
 		})
 
-	channel.SendJSON(c, session.Token, map[string]string {
-		"Action": "Refresh",
-		"Message": "Stack Shutdown",
-	})
+	callback.StackShutdown()
 }
 
-func StartupEnvironment(c appengine.Context, session *Session, stack string, environment string, profile Creds) {
+func StartupEnvironment(l log.Logger, client *http.Client, regionMap map[string]string, stack string, environment string, profileName string, publicKey string, secretKey string, callback ActionCallBacks) {
 	// Get instances and filter for the environments
-	client := urlfetch.Client(c)
 
-	tiered_instances, max_order_pos := GetInstanceGroupTeirMap(c, client, session, stack, environment, profile)
+	tiered_instances, max_order_pos := GetInstanceGroupTeirMap(l, client, regionMap, stack, environment, profileName)
 
 	tmp,_ := json.Marshal(tiered_instances)
 	c.Infof("%s", tmp)
@@ -159,43 +150,31 @@ func StartupEnvironment(c appengine.Context, session *Session, stack string, env
 
 	// validate we can shut them down
 	if instance_list, ok := tiered_instances[""]; ok && len(instance_list) > 0 {
-		channel.SendJSON(c, session.Token, map[string]string {
-			"Error": "Can not startup or shutdown environment.\nEnsure all tags are in use.",
-		})
+		callback.NoSuchEnvironment()
 		return
 	}
 	if max_order_pos < 1 {
 		// Nothing to do, no shutdown order
-		channel.SendJSON(c, session.Token, map[string]string {
-			"Error": "No startup or shutdown tags filled, or all are below 1.",
-		})
+		callback.MisingOrderTags()
 		return
 	}
 
 	// Loop through each milestone shutting down instances in parallel
-	TeiredInstanceExecute(c, session, tiered_instances, max_order_pos, func (ids []string, regionUrl string, successChannel chan aws.StartInstance) {
-			instances, _, _ := aws.StartInstances(profile.Pkey, profile.Skey, regionUrl, client, nil, ids...)
-			err := WaitUntilInstanceStatusIs(c, profile.Pkey, profile.Skey, regionUrl, client, nil, "running", ids...)
+	TeiredInstanceExecute(l, regionMap, tiered_instances, max_order_pos, func (ids []string, regionUrl string, successChannel chan aws.StartInstance) {
+			instances, _, _ := aws.StartInstances(publicKey, secretKey, regionUrl, client, nil, ids...)
+			err := WaitUntilInstanceStatusIs(l, client, publicKey, secretKey, regionUrl, client, nil, "running", ids...)
 			if err == nil {
-				channel.SendJSON(c, session.Token, map[string]string {
-					"Action": "Refresh",
-					"Message": "Teir startup",
-				})
+				callback.TierStartedup()
 			} else {
-				channel.SendJSON(c, session.Token, map[string]string {
-					"Error": "Teir taking to long skipping to next",
-				})
+				callback.TierTakingTooLong()
 			}
 			successChannel <- instances
 		})
 
-	channel.SendJSON(c, session.Token, map[string]string {
-		"Action": "Refresh",
-		"Message": "Stack startup",
-	})
+	callback.StackStartedup()
 }
 
-func WaitUntilInstanceStatusIs(c appengine.Context, accessKey string, secretKey string, regionEndpoint string, client *http.Client, w http.ResponseWriter, status string, instanceIds ...string) (err error) {
+func WaitUntilInstanceStatusIs(l log.Logger, client *http.Client, accessKey string, secretKey string, regionEndpoint string, client *http.Client, w http.ResponseWriter, status string, instanceIds ...string) (err error) {
 	for tries := 0;;tries++ {
 		time.Sleep(time.Second * 30)
 		instantStatuses, err := aws.GetInstancesStatus(accessKey, secretKey, regionEndpoint, client, nil, true, instanceIds...)
