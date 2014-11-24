@@ -126,7 +126,7 @@ func ShutdownEnvironment(client *http.Client, regionMap map[string]string, stack
 
 	// Loop through each milestone shutting down instances in parallel
 	TeiredInstanceExecute(callback, regionMap, tiered_instances, max_order_pos, func (ids []string, regionUrl string, successChannel chan aws.StartInstance) {
-			instances, _, _ := aws.StopInstances(publicKey, secretKey, regionUrl, client, nil, ids...)
+			instances, _, _ := aws.StopInstances(publicKey, secretKey, regionUrl, client, ids...)
 			err := WaitUntilInstanceStatusIs(callback, publicKey, secretKey, regionUrl, client, nil, "stopped", ids...)
 			if err == nil {
 				callback.TierShutdown()
@@ -177,7 +177,7 @@ func StartupEnvironment(client *http.Client, regionMap map[string]string, stack 
 func WaitUntilInstanceStatusIs(callback ActionCallBacks, accessKey string, secretKey string, regionEndpoint string, client *http.Client, w http.ResponseWriter, status string, instanceIds ...string) (err error) {
 	for tries := 0;;tries++ {
 		time.Sleep(time.Second * 30)
-		instantStatuses, err := aws.GetInstancesStatus(accessKey, secretKey, regionEndpoint, client, nil, true, instanceIds...)
+		instantStatuses, err := aws.GetInstancesStatus(accessKey, secretKey, regionEndpoint, client, true, instanceIds...)
 		if err != nil {
 			callback.Infof("Lookup error: %s\n", err)
 			continue;
