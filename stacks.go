@@ -161,7 +161,7 @@ func StartupEnvironment(client *http.Client, regionMap map[string]string, stack 
 
 	// Loop through each milestone shutting down instances in parallel
 	TeiredInstanceExecute(callback, regionMap, tiered_instances, max_order_pos, func (ids []string, regionUrl string, successChannel chan aws.StartInstance) {
-			instances, _, _ := aws.StartInstances(publicKey, secretKey, regionUrl, client, nil, ids...)
+			instances, _, _ := aws.StartInstances(publicKey, secretKey, regionUrl, client, ids...)
 			err := WaitUntilInstanceStatusIs(callback, publicKey, secretKey, regionUrl, client, nil, "running", ids...)
 			if err == nil {
 				callback.TierStartedup()
